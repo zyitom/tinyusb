@@ -72,6 +72,7 @@ typedef struct TU_ATTR_ALIGNED(4) {
 // Memory API
 //--------------------------------------------------------------------+
 
+#if CFG_TUD_MEM_DCACHE_ENABLE
 // clean/flush data cache: write cache -> memory.
 // Required before an DMA TX transfer to make sure data is in memory
 bool dcd_dcache_clean(const void* addr, uint32_t data_size);
@@ -83,6 +84,15 @@ bool dcd_dcache_invalidate(const void* addr, uint32_t data_size);
 // clean and invalidate data cache
 // Required before an DMA transfer where memory is both read/write by DMA
 bool dcd_dcache_clean_invalidate(const void* addr, uint32_t data_size);
+
+#else
+// Without a data cache these are pure no-ops, but as extern functions they still cost a real call at
+// every DMA hand-off -- including several inside dcd_int_handler(). Define them away so the call sites
+// can stay unconditional and the ports that never enable dcache pay nothing for them.
+#define dcd_dcache_clean(addr, data_size)            ((void) (addr), (void) (data_size), true)
+#define dcd_dcache_invalidate(addr, data_size)       ((void) (addr), (void) (data_size), true)
+#define dcd_dcache_clean_invalidate(addr, data_size) ((void) (addr), (void) (data_size), true)
+#endif
 
 //--------------------------------------------------------------------+
 // Controller API

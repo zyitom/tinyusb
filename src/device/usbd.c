@@ -78,6 +78,7 @@ TU_ATTR_WEAK void dcd_disconnect(uint8_t rhport) {
   (void) rhport;
 }
 
+#if CFG_TUD_MEM_DCACHE_ENABLE
 TU_ATTR_WEAK bool dcd_dcache_clean(const void* addr, uint32_t data_size) {
   (void) addr; (void) data_size;
   return true;
@@ -92,6 +93,7 @@ TU_ATTR_WEAK bool dcd_dcache_clean_invalidate(const void* addr, uint32_t data_si
   (void) addr; (void) data_size;
   return true;
 }
+#endif
 
 //--------------------------------------------------------------------+
 // Device Data
