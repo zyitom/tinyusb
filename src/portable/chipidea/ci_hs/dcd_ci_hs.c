@@ -678,14 +678,20 @@ void dcd_int_handler(uint8_t rhport) {
     // nothing to do, we will submit xfer as error to usbd
     // if (int_status & INTR_ERROR) { }
 
-    if (edpt_complete) {
-      for (uint8_t epnum = 0; epnum < TUP_DCD_ENDPOINT_MAX; epnum++) {
-        if (tu_bit_test(edpt_complete, epnum)) {
-          process_edpt_complete_isr(rhport, epnum, TUSB_DIR_OUT);
-        }
-        if (tu_bit_test(edpt_complete, epnum + 16)) {
-          process_edpt_complete_isr(rhport, epnum, TUSB_DIR_IN);
-        }
+    // Walk only the endpoints that actually completed. Folding the IN half (bit 16+n) onto the OUT
+    // half (bit n) keeps a device with one bulk pair at two iterations instead of TUP_DCD_ENDPOINT_MAX,
+    // while leaving OUT and IN of the same endpoint adjacent and in that order -- the setup handling
+    // below depends on a control status completion still being queued ahead of the next SETUP.
+    uint32_t pending = (edpt_complete | (edpt_complete >> 16)) & 0xFFFFu;
+    while (pending) {
+      const uint8_t epnum = (uint8_t)__builtin_ctz(pending);
+      pending &= pending - 1u;
+
+      if (tu_bit_test(edpt_complete, epnum)) {
+        process_edpt_complete_isr(rhport, epnum, TUSB_DIR_OUT);
+      }
+      if (tu_bit_test(edpt_complete, epnum + 16)) {
+        process_edpt_complete_isr(rhport, epnum, TUSB_DIR_IN);
       }
     }
 
