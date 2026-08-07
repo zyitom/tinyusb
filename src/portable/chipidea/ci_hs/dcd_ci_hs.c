@@ -695,7 +695,21 @@ void dcd_int_handler(uint8_t rhport) {
     // in the same frame and we should handle previous status first.
     if (dcd_reg->ENDPTSETUPSTAT) {
       dcd_reg->ENDPTSETUPSTAT = dcd_reg->ENDPTSETUPSTAT;
-      dcd_event_setup_received(rhport, (uint8_t *)(uintptr_t)&_dcd_data.qhd[0][0].setup_request, true);
+
+      // The controller writes the qhd setup buffer whenever a SETUP arrives, without regard for what
+      // software is doing, so reading it directly races a back-to-back SETUP and can hand usbd a torn
+      // packet. The SETUP tripwire is the semaphore the manual prescribes for that read: set it, copy,
+      // and retry for as long as the hardware finds it knocked down -- which is exactly what happens
+      // when a new SETUP landed during the copy.
+      uint8_t setup_packet[8];
+      do {
+        dcd_reg->USBCMD |= USBCMD_SETUP_TRIPWIRE;
+        dcd_dcache_invalidate(&_dcd_data.qhd[0][0].setup_request, sizeof(setup_packet));
+        memcpy(setup_packet, (const void *)(uintptr_t)&_dcd_data.qhd[0][0].setup_request, sizeof(setup_packet));
+      } while (!(dcd_reg->USBCMD & USBCMD_SETUP_TRIPWIRE));
+      dcd_reg->USBCMD &= ~USBCMD_SETUP_TRIPWIRE;
+
+      dcd_event_setup_received(rhport, setup_packet, true);
     }
   }
 
