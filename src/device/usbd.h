@@ -122,6 +122,12 @@ bool tud_connect(void);
 // Enable or disable the Start Of Frame callback support
 void tud_sof_cb_enable(bool en);
 
+// HCS: the application calls this when the host fetches the MS OS 2.0 descriptor
+// set. Only Windows hosts fetch it, and only they reset their own data toggle on
+// CLEAR_FEATURE(HALT) of a healthy endpoint -- usbd_edpt_clear_stall gates the
+// device-side toggle reset on this (Linux DMTool desyncs otherwise).
+void usbd_note_ms_os_20_fetch(void);
+
 // Carry out Data and Status stage of control transfer
 // - If len = 0, it is equivalent to sending status only
 // - If len > wLength : it will be truncated

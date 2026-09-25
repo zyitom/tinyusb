@@ -518,6 +518,19 @@ bool tud_configure(uint8_t rhport, uint32_t cfg_id, const void* cfg_param) {
   return dcd_configure(rhport, cfg_id, cfg_param);
 }
 
+// HCS: no enabled driver implements sof() -- skip the per-SOF class driver
+// iteration entirely (it runs every 125 us in ISR context on SOF-enabled builds).
+static bool _usbd_has_sof_driver = false;
+
+// HCS: set when the host fetches the MS OS 2.0 descriptor set. Only Windows does,
+// and only Windows resets its own data toggle on CLEAR_FEATURE(HALT) of a healthy
+// endpoint; see usbd_edpt_clear_stall. Cleared on bus reset (new enumeration).
+static bool _usbd_ms_os_20_host = false;
+
+void usbd_note_ms_os_20_fetch(void) {
+  _usbd_ms_os_20_host = true;
+}
+
 bool tud_rhport_init(uint8_t rhport, const tusb_rhport_init_t* rh_init) {
   if (tud_inited()) {
     return true; // skip if already initialized
@@ -573,6 +586,14 @@ bool tud_rhport_init(uint8_t rhport, const tusb_rhport_init_t* rh_init) {
     TU_ASSERT(driver && driver->init);
     TU_LOG_USBD("%s init\r\n", driver->name);
     driver->init();
+  }
+
+  for (uint8_t i = 0; i < TOTAL_DRIVER_COUNT; i++) {
+    usbd_class_driver_t const* driver = get_driver(i);
+    if (driver && driver->sof) {
+      _usbd_has_sof_driver = true;
+      break;
+    }
   }
 
   _usbd_rhport = rhport;
@@ -698,6 +719,7 @@ void tud_task_ext(uint32_t timeout_ms, bool in_isr) {
 
     switch (event.event_id) {
       case DCD_EVENT_BUS_RESET:
+        _usbd_ms_os_20_host = false;
         TU_LOG_USBD(": %s Speed\r\n", tu_str_speed[event.bus_reset.speed]);
         usbd_reset(event.rhport);
         _usbd_dev.speed = event.bus_reset.speed;
@@ -1417,10 +1439,12 @@ TU_ATTR_FAST_FUNC void dcd_event_handler(dcd_event_t const* event, bool in_isr) 
 
     case DCD_EVENT_SOF:
       // SOF driver handler in ISR context
-      for (uint8_t i = 0; i < TOTAL_DRIVER_COUNT; i++) {
-        usbd_class_driver_t const* driver = get_driver(i);
-        if (driver && driver->sof) {
-          driver->sof(event->rhport, event->sof.frame_count);
+      if (_usbd_has_sof_driver) {
+        for (uint8_t i = 0; i < TOTAL_DRIVER_COUNT; i++) {
+          usbd_class_driver_t const* driver = get_driver(i);
+          if (driver && driver->sof) {
+            driver->sof(event->rhport, event->sof.frame_count);
+          }
         }
       }
 
@@ -1667,7 +1691,15 @@ void usbd_edpt_clear_stall(uint8_t rhport, uint8_t ep_addr) {
 
   TU_LOG_USBD("    Clear Stall EP %02X\r\n", ep_addr);
   const bool was_stalled = (_usbd_dev.ep_status[epnum][dir] & TU_EDPT_STATE_STALLED) != 0;
-  dcd_edpt_clear_stall(rhport, ep_addr);
+  // HCS: on a healthy endpoint the dcd call below only resets the data toggle.
+  // Windows hosts reset their own toggle on CLEAR_FEATURE(HALT) and expect the
+  // device to match; they identify themselves by fetching the MS OS 2.0 set
+  // (usbd_note_ms_os_20_fetch). Linux hosts do not reset theirs, so an
+  // unconditional toggle reset desyncs them -- DMTool's per-command clear_halt
+  // timed out on Linux. A real stall always takes the recovery path.
+  if (was_stalled || _usbd_ms_os_20_host) {
+    dcd_edpt_clear_stall(rhport, ep_addr);
+  }
   // Clear STALLED|BUSY unconditionally (long-standing behavior; some classes, e.g. audio's
   // set-interface, call this on a non-stalled endpoint solely to drop a leftover BUSY bit).
   // Only release the CLAIMED ownership bit when the endpoint was actually stalled: the stall
