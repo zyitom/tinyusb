@@ -176,8 +176,21 @@ TU_ATTR_ALWAYS_INLINE static inline uint8_t ci_ep_count(const ci_hs_regs_t *dcd_
 // Controller API
 //--------------------------------------------------------------------+
 
+// [HCS] Bus reset handshake must not spin forever: this runs in the USB IRQ,
+// and a wedged controller that never clears ENDPTPRIME/ENDPTFLUSH would hang
+// the whole board. Bounded wait; ported from Alliance-Algorithm/hpm_sdk 97168c2
+// (fix(usb): Bound IRQ-context bus reset and qTD walk waits), adapted to
+// dcd_ci_hs, the driver this firmware actually builds.
+#define CI_HS_HW_CLEAR_WAIT_LIMIT 100000U
+
+static bool ci_hs_wait_reg_clear(volatile uint32_t *reg, uint32_t mask) {
+  uint32_t wait = CI_HS_HW_CLEAR_WAIT_LIMIT;
+  while ((*reg & mask) && --wait) {}
+  return wait != 0U;
+}
+
 /// follows LPC43xx User Manual 23.10.3
-static void bus_reset(uint8_t rhport) {
+static bool bus_reset(uint8_t rhport) {
   ci_hs_regs_t *dcd_reg = CI_HS_REG(rhport);
 
   // The reset value for all endpoint types is the control endpoint. If one endpoint
@@ -197,9 +210,18 @@ static void bus_reset(uint8_t rhport) {
   dcd_reg->ENDPTSETUPSTAT = dcd_reg->ENDPTSETUPSTAT;
   dcd_reg->ENDPTCOMPLETE  = dcd_reg->ENDPTCOMPLETE;
 
-  while (dcd_reg->ENDPTPRIME) {}
+  // [HCS] Bounded: on timeout mask all interrupt sources so a wedged controller
+  // cannot re-enter the handler, and skip queueing the reset event -- the host
+  // then observes a dead device instead of a zombie board.
+  if (!ci_hs_wait_reg_clear(&dcd_reg->ENDPTPRIME, 0xFFFFFFFFu)) {
+    dcd_reg->USBINTR = 0;
+    return false;
+  }
   dcd_reg->ENDPTFLUSH = 0xFFFFFFFF;
-  while (dcd_reg->ENDPTFLUSH) {}
+  if (!ci_hs_wait_reg_clear(&dcd_reg->ENDPTFLUSH, 0xFFFFFFFFu)) {
+    dcd_reg->USBINTR = 0;
+    return false;
+  }
 
   // read reset bit in portsc
 
@@ -214,6 +236,8 @@ static void bus_reset(uint8_t rhport) {
   _dcd_data.qhd[0][0].int_on_setup = 1; // OUT only
 
   dcd_dcache_clean_invalidate(&_dcd_data, sizeof(dcd_data_t));
+
+  return true;
 }
 
 bool dcd_init(uint8_t rhport, const tusb_rhport_init_t *rh_init) {
@@ -642,8 +666,11 @@ void dcd_int_handler(uint8_t rhport) {
 
       if (dcd_reg->PORTSC1 & PORTSC1_CURRENT_CONNECT_STATUS) {
         const uint32_t speed = (dcd_reg->PORTSC1 & PORTSC1_PORT_SPEED) >> PORTSC1_PORT_SPEED_POS;
-        bus_reset(rhport);
-        dcd_event_bus_reset(rhport, (tusb_speed_t)speed, true);
+        // [HCS] Wedged controller: bus_reset already masked USBINTR; skip the
+        // event and leave the device silent rather than spinning in the IRQ.
+        if (bus_reset(rhport)) {
+          dcd_event_bus_reset(rhport, (tusb_speed_t)speed, true);
+        }
       } else {
         dcd_event_bus_signal(rhport, DCD_EVENT_UNPLUGGED, true);
       }
