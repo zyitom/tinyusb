@@ -71,10 +71,22 @@ static vendord_interface_t _vendord_itf[CFG_TUD_VENDOR];
 #if CFG_TUD_EDPT_DEDICATED_HWFIFO == 0 || !CFG_TUD_VENDOR_TXRX_BUFFERED
 typedef struct {
   TUD_EPBUF_DEF(epout, CFG_TUD_VENDOR_RX_EPSIZE);
+  #if CFG_TUD_VENDOR_RX_ARM_FIRST
+  TUD_EPBUF_DEF(epout2, CFG_TUD_VENDOR_RX_EPSIZE); // the other OUT buffer, see vendor_device.h
+  #endif
   TUD_EPBUF_DEF(epin, CFG_TUD_VENDOR_TX_EPSIZE);
 } vendord_epbuf_t;
 
 CFG_TUD_MEM_SECTION static vendord_epbuf_t _vendord_epbuf[CFG_TUD_VENDOR];
+#endif
+
+#if CFG_TUD_VENDOR_RX_ARM_FIRST
+  #if CFG_TUD_VENDOR_TXRX_BUFFERED || CFG_TUD_VENDOR_RX_MANUAL_XFER
+    #error "CFG_TUD_VENDOR_RX_ARM_FIRST needs non-FIFO mode with automatic re-arm"
+  #endif
+// Which OUT buffer is armed: 0 = epout, 1 = epout2. Only touched from open() and the
+// completion callback, both in tud_task().
+static uint8_t _vendord_rx_armed_second[CFG_TUD_VENDOR];
 #endif
 
 #if CFG_TUD_VENDOR_EP_INT_OUT || CFG_TUD_VENDOR_EP_INT_IN
@@ -591,6 +603,9 @@ static bool vendord_set_alt(uint8_t rhport, uint8_t idx, uint8_t alt) {
             p_vendor->rx_xfer_len =
               CFG_TUD_VENDOR_RX_NEED_ZLP ? CFG_TUD_VENDOR_RX_EPSIZE : tu_edpt_packet_size(desc_ep);
   #if CFG_TUD_VENDOR_RX_MANUAL_XFER == 0
+    #if CFG_TUD_VENDOR_RX_ARM_FIRST
+            _vendord_rx_armed_second[idx] = 0;
+    #endif
             TU_ASSERT(usbd_edpt_xfer(rhport, p_vendor->ep_out, _vendord_epbuf[idx].epout,
                                      p_vendor->rx_xfer_len, false));
   #endif
@@ -822,6 +837,9 @@ uint16_t vendord_open(uint8_t rhport, const tusb_desc_interface_t *desc_itf, uin
         p_vendor->ep_out     = desc_ep->bEndpointAddress;
     #if CFG_TUD_VENDOR_RX_MANUAL_XFER == 0
         // Prepare for incoming data
+      #if CFG_TUD_VENDOR_RX_ARM_FIRST
+        _vendord_rx_armed_second[idx] = 0;
+      #endif
         TU_ASSERT(usbd_edpt_xfer(rhport, p_vendor->ep_out, _vendord_epbuf[idx].epout, rx_xfer_len, false), 0);
     #endif
       }
@@ -923,9 +941,19 @@ bool vendord_xfer_cb(uint8_t rhport, uint8_t ep_addr, xfer_result_t result, uint
   #else
   if (ep_addr == p_vendor->ep_out) {
     // Non-FIFO mode: invoke callback with buffer
+    #if CFG_TUD_VENDOR_RX_ARM_FIRST
+    // Arm the other buffer first, then hand the finished one to the application.
+    uint8_t *const done = _vendord_rx_armed_second[idx] ? _vendord_epbuf[idx].epout2 : _vendord_epbuf[idx].epout;
+    _vendord_rx_armed_second[idx] ^= 1;
+    usbd_edpt_xfer(rhport, p_vendor->ep_out,
+                   _vendord_rx_armed_second[idx] ? _vendord_epbuf[idx].epout2 : _vendord_epbuf[idx].epout,
+                   p_vendor->rx_xfer_len, false);
+    tud_vendor_rx_cb(idx, done, xferred_bytes);
+    #else
     tud_vendor_rx_cb(idx, _vendord_epbuf[idx].epout, xferred_bytes);
-    #if CFG_TUD_VENDOR_RX_MANUAL_XFER == 0
+      #if CFG_TUD_VENDOR_RX_MANUAL_XFER == 0
     usbd_edpt_xfer(rhport, p_vendor->ep_out, _vendord_epbuf[idx].epout, p_vendor->rx_xfer_len, false);
+      #endif
     #endif
   } else if (ep_addr == p_vendor->ep_in) {
     // Send complete

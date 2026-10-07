@@ -60,6 +60,16 @@ extern "C" {
   #define CFG_TUD_VENDOR_RX_NEED_ZLP 0
 #endif
 
+// libhcs local patch: arm-before-callback for the OUT endpoint in non-FIFO mode.
+// The class keeps two OUT buffers per interface; on completion it arms the other one
+// first and only then hands the finished one to tud_vendor_rx_cb(), so the endpoint is
+// not NAKing the host while the application processes a packet. The callback's buffer
+// stays valid until it returns (the next completion is handled after it, in tud_task()),
+// but must not be retained past that. Requires automatic re-arm (RX_MANUAL_XFER == 0).
+#ifndef CFG_TUD_VENDOR_RX_ARM_FIRST
+  #define CFG_TUD_VENDOR_RX_ARM_FIRST 0
+#endif
+
 // Enable support for an optional interrupt OUT / interrupt IN endpoint in the vendor
 // interface, each direction gated separately. Interrupt endpoints are non-buffered:
 // OUT is armed manually one packet at a time with tud_vendor_n_int_read_xfer() (data
